@@ -427,6 +427,7 @@ function onChange(c,T,pl){
 function friendlyAuthErr(e){const m=(e&&e.message)||"";
   if(/rate limit|security purposes|too many/i.test(m))return "Too many sign-in emails were requested. Wait a minute and try again. (Judge Advisor: if this keeps happening, set up custom email in Supabase; see the setup guide.)";
   if(/expired|invalid|otp/i.test(m))return "That code is wrong or has expired. Request a new one.";
+  if(/error sending|sending .*email|smtp/i.test(m))return "The site couldn't send the sign-in email right now. Please tell the Judge Advisor. (Judge Advisor: check the SMTP settings in Supabase → Authentication → Emails.)";
   if(/signups not allowed/i.test(m))return "New sign-ups are turned off for this site. Ask the Judge Advisor to turn on email sign-ups in Supabase.";
   return m||"Something went wrong. Try again.";}
 async function sendLink(email){
