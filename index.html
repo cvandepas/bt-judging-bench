@@ -306,7 +306,7 @@ function ago(iso){if(!iso)return "—";const s=(Date.now()-Date.parse(iso))/1000
 
 /* ---------- state & store ---------- */
 const CFG=window.BT_CONFIG||{};
-const S={mode:"loading",phase:"loading",teams:{},sheets:{},perf:{},members:{},
+const S={mode:"loading",inviting:{},bulk:null,phase:"loading",teams:{},sheets:{},perf:{},members:{},
   cfg:{...DEFAULT_CFG,...(CFG.eventName?{name:CFG.eventName}:{})},overrides:{},panel:{excluded:{}},
   me:{id:null},member:null,isAdvisor:false,sheetDenied:false,
   auth:{sentTo:null,busy:false,err:"",info:""},
@@ -324,14 +324,16 @@ function toRow(c,id,d){
   if(c==="perf")return {team_id:id,qual:d.qual||null,skills:d.skills||null,auton:!!d.auton};
   if(c==="sheets")return {judge_email:id,doc:d,updated_at:new Date().toISOString()};
   if(c==="meta")return {key:id,value:d||{}};
-  if(c==="members")return {email:id,role:d.role==="advisor"?"advisor":"judge",name:d.name||null,initials:d.initials||null,active:d.active!==false};
+  if(c==="members")return {email:id,role:d.role==="advisor"?"advisor":"judge",name:d.name||null,initials:d.initials||null,active:d.active!==false,
+    last_invited_at:d.lastInvitedAt||null,invite_tried_at:d.inviteTriedAt||null,invite_count:d.inviteCount||0,invite_error:d.inviteError||null};
 }
 function fromRow(c,r){
   if(c==="teams")return {number:r.number,name:r.name,org:r.org,notebook:r.notebook,...(r.example?{example:true}:{})};
   if(c==="perf")return {qual:r.qual,skills:r.skills,auton:r.auton};
   if(c==="sheets")return r.doc||{};
   if(c==="meta")return r.value||{};
-  if(c==="members")return {role:r.role,name:r.name||"",initials:r.initials||"",active:r.active};
+  if(c==="members")return {role:r.role,name:r.name||"",initials:r.initials||"",active:r.active,
+    lastInvitedAt:r.last_invited_at||null,inviteTriedAt:r.invite_tried_at||null,inviteCount:r.invite_count||0,inviteError:r.invite_error||null};
 }
 async function write(path,data){
   if(S.mode!=="web"){persistLocal();return}
@@ -432,6 +434,7 @@ function friendlyAuthErr(e){const m=(e&&e.message)||"";
   return m||"Something went wrong. Try again.";}
 async function sendLink(email){
   email=String(email||"").trim().toLowerCase();if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){S.auth.err="Enter a full email address.";return render()}
+  const typo=emailTypo(email);if(typo&&S.auth.typoFor!==email){S.auth.typoFor=email;S.auth.err=`Did you mean ${typo}? Fix the address and send again, or send again to use ${email} as typed.`;return render()}
   S.auth={...S.auth,busy:true,err:"",info:""};render();
   const {error}=await sb.auth.signInWithOtp({email,options:{shouldCreateUser:true,emailRedirectTo:location.origin+location.pathname}});
   S.auth.busy=false;
@@ -443,6 +446,44 @@ async function verifyCode(code){
   S.auth={...S.auth,busy:true,err:""};render();
   const {error}=await sb.auth.verifyOtp({email:S.auth.sentTo,token:code,type:"email"});
   S.auth.busy=false;if(error){S.auth.err=friendlyAuthErr(error);render();}
+}
+/* ---------- invites (Judge Advisor) ---------- */
+const INVITE_COOLDOWN=61000;
+function emailTypo(email){const m=/^([^@]+)@(.+)$/.exec(email);if(!m)return null;let d=m[2];
+  const fix={"hmail.com":"gmail.com","gmial.com":"gmail.com","gmai.com":"gmail.com","gmal.com":"gmail.com","gnail.com":"gmail.com","gamil.com":"gmail.com","yahooo.com":"yahoo.com","outlok.com":"outlook.com","hotmial.com":"hotmail.com","iclod.com":"icloud.com"};
+  d=d.replace(/\.(con|cmo|ocm|vom|comm)$/i,".com");d=fix[d.toLowerCase()]||d;const s=m[1]+"@"+d;return s.toLowerCase()!==email.toLowerCase()?s:null}
+function inviteErrText(e){const m=(e&&e.message)||"",code=(e&&e.code)||"",st=e&&e.status;
+  if(code==="over_email_send_rate_limit"||(st===429&&/email rate/i.test(m)))return "Hourly email limit reached. Raise it in Supabase → Authentication → Rate Limits (built-in email allows only 2 per hour).";
+  if(st===429||/security purposes|only request this after/i.test(m))return "A sign-in email went to this address under a minute ago. Wait 60 seconds, then resend.";
+  if(code==="email_address_invalid"||/is invalid/i.test(m))return "Supabase says this address isn't valid. Check the spelling.";
+  if(/error sending|smtp|535|confirmation email/i.test(m))return "The email server refused to send. Check Supabase → Authentication → Emails → SMTP Settings.";
+  if(/signups not allowed/i.test(m))return "Email sign-ups are turned off in Supabase → Authentication → Sign In / Providers.";
+  return m||"Couldn't send. Try again.";}
+function cooldownLeft(m){const t=m&&m.inviteTriedAt?Date.parse(m.inviteTriedAt):0;return Math.max(0,INVITE_COOLDOWN-(Date.now()-t))}
+async function sendInvite(email,{quiet}={}){
+  const m=S.members[email];if(!m)return false;
+  if(S.mode!=="web"){if(!quiet)toast("Demo mode doesn't send email. Connect Supabase to send invites.");return false}
+  S.inviting=S.inviting||{};if(S.inviting[email])return false;
+  S.inviting[email]=true;render();
+  let error=null;
+  try{const r=await sb.auth.signInWithOtp({email,options:{shouldCreateUser:true,emailRedirectTo:location.origin+location.pathname}});error=r.error}catch(e){error=e}
+  delete S.inviting[email];
+  const now=new Date().toISOString(),cur=S.members[email]||m;
+  const patch=error?{inviteTriedAt:now,inviteError:inviteErrText(error)}:{inviteTriedAt:now,lastInvitedAt:now,inviteCount:(cur.inviteCount||0)+1,inviteError:null};
+  setMember(email,patch);
+  setTimeout(render,INVITE_COOLDOWN+200);
+  if(!quiet)toast(error?"Not sent: "+patch.inviteError:"Sign-in email sent to "+email);
+  return error?patch.inviteError:true;
+}
+setInterval(()=>{if(!S.isAdvisor)return;let reopen=false;document.querySelectorAll("[data-invite]").forEach(b=>{const em=b.dataset.invite,m=S.members[em];if(!m||S.inviting[em]||S.bulk)return;const w=cooldownLeft(m);
+  if(w>0){b.disabled=true;b.textContent=`Wait ${Math.ceil(w/1000)}s`}else if(/^Wait/.test(b.textContent)){reopen=true}});if(reopen)render();},1000);
+async function inviteAll(){
+  const list=Object.entries(S.members).filter(([em,m])=>m.active&&!S.sheets[em]&&em!==S.me.id&&cooldownLeft(m)===0).map(([em])=>em);
+  if(!list.length)return toast("Everyone active has joined, or was emailed in the last minute.");
+  S.bulk={done:0,total:list.length};render();let sent=0,stop=null;
+  for(const em of list){const r=await sendInvite(em,{quiet:true});S.bulk.done++;if(r===true)sent++;else if(typeof r==="string"&&/Hourly email limit|refused to send|turned off/.test(r)){stop=r;break}render();}
+  S.bulk=null;render();
+  toast(stop?`Sent ${sent} of ${list.length}. Stopped: ${stop}`:`Sent ${sent} of ${list.length} sign-in emails.`);
 }
 async function signOut(){
   if(S.mode!=="web")return;
@@ -799,24 +840,39 @@ function feedback(t,a){
 }
 
 /* ----- Setup ----- */
+function inviteCell(email,m){
+  const busy=S.inviting&&S.inviting[email],wait=cooldownLeft(m),joined=!!S.sheets[email],k=esc(email);
+  let st;
+  if(busy)st=`<span class="pill p-blue">sending…</span>`;
+  else if(m.inviteError&&(!m.lastInvitedAt||Date.parse(m.inviteTriedAt||0)>Date.parse(m.lastInvitedAt)))st=`<span class="pill p-bad">not sent</span><span class="small" style="color:var(--bad);white-space:normal;max-width:30ch;display:block">${esc(m.inviteError)}</span>`;
+  else if(m.lastInvitedAt)st=`<span class="small muted">Sent ${esc(ago(m.lastInvitedAt))}${m.inviteCount>1?` · ${m.inviteCount}×`:""}</span>`;
+  else st=`<span class="small muted">${joined?"Signed in":"Not emailed yet"}</span>`;
+  const label=m.lastInvitedAt||m.inviteError?"Resend":"Send invite";
+  const btn=!m.active?"":`<button type="button" data-invite="${k}" ${busy||wait||S.bulk?"disabled":""} title="Emails a fresh sign-in link and 6-digit code">${busy?"Sending…":wait?`Wait ${Math.ceil(wait/1000)}s`:label}</button>`;
+  return `<div class="stack" style="gap:4px;align-items:flex-start">${st}${btn}</div>`;
+}
 function membersPanel(){
   if(!S.isAdvisor)return `<div class="panel"><h3>Judges &amp; access</h3><p class="small muted">The Judge Advisor manages which emails can sign in. ${Object.values(S.members).filter(m=>m.active).length} people are on this panel.</p></div>`;
+  const notJoined=Object.entries(S.members).filter(([em,m])=>m.active&&!S.sheets[em]&&em!==S.me.id),pending=notJoined.filter(([,m])=>cooldownLeft(m)===0).length;
   const rows=Object.entries(S.members).sort((a,b)=>(a[1].role===b[1].role?0:a[1].role==="advisor"?-1:1)||a[0].localeCompare(b[0])).map(([email,m])=>{
     const self=email===S.me.id,joined=!!S.sheets[email],k=esc(email);
     const status=!m.active?'<span class="pill p-mute">turned off</span>':joined?'<span class="pill p-good">joined</span>':'<span class="pill p-warn">invited</span>';
     return `<tr><td><div class="who">${avatar(judgeInfo(email))}<div class="stack" style="gap:0"><b>${esc(m.name||"—")}${self?" (you)":""}</b><span class="small muted">${k}</span></div></div></td>
      <td><select id="mr-${k}" data-mrole="${k}" ${self?"disabled":""} aria-label="Role for ${k}"><option value="judge" ${m.role!=="advisor"?"selected":""}>Judge</option><option value="advisor" ${m.role==="advisor"?"selected":""}>Judge Advisor</option></select></td>
      <td>${status}</td>
+     <td>${inviteCell(email,m)}</td>
      <td><label class="chk"><input type="checkbox" id="ma-${k}" data-mactive="${k}" ${m.active?"checked":""} ${self?"disabled":""}> can sign in</label></td>
      <td>${self?"":`<button type="button" class="danger" data-mremove="${k}">${S.confirmRemove===email?"Confirm remove":"Remove"}</button>`}</td></tr>`}).join("");
-  return `<div class="panel"><h3>Judges &amp; access</h3>
-   <p class="small muted">Add each judge's email. They go to this site, enter that email, and sign in with the link or code we email them. Judges read every scoresheet and change only their own. Judge Advisors also manage teams, settings, ranks, award decisions and this list.</p>
-   <div class="tbl"><table><thead><tr><th>Person</th><th>Role</th><th>Status</th><th>Access</th><th></th></tr></thead><tbody>${rows||`<tr><td colspan="5" class="muted">No one yet.</td></tr>`}</tbody></table></div>
+  return `<div class="panel"><div class="row between"><h3>Judges &amp; access</h3>
+    ${notJoined.length?`<button type="button" data-act="inviteall" ${S.bulk||!pending?"disabled":""}>${S.bulk?`Sending ${S.bulk.done}/${S.bulk.total}…`:pending?`Email all ${pending} who haven't joined`:"All not-joined judges were just emailed"}</button>`:""}</div>
+   <p class="small muted">Add each judge's email. "Send invite" emails them a fresh sign-in link and 6-digit code for this site; each new email replaces the last one. Judges read every scoresheet and change only their own. Judge Advisors also manage teams, settings, ranks, award decisions and this list.</p>
+   ${S.mode==="demo"?`<div class="banner info small">Demo mode doesn't send email.</div>`:""}
+   <div class="tbl"><table><thead><tr><th>Person</th><th>Role</th><th>Status</th><th>Sign-in email</th><th>Access</th><th></th></tr></thead><tbody>${rows||`<tr><td colspan="6" class="muted">No one yet.</td></tr>`}</tbody></table></div>
    <form id="addmember" class="grid2" style="align-items:end"><label class="f">Judge name<input id="am-name" placeholder="Pat Rivera" autocomplete="off"></label>
     <label class="f">Email<input id="am-email" type="email" required placeholder="judge@example.org" autocomplete="off"></label>
     <label class="f">Role<select id="am-role"><option value="judge">Judge</option><option value="advisor">Judge Advisor</option></select></label>
-    <div class="row"><button class="primary">Add to panel</button></div></form>
-   <p class="small muted">Removing someone keeps any scores they entered. Use the Panel tab to stop counting a judge's sheet. Turning off "can sign in" blocks them right away.</p></div>`;
+    <div class="stack" style="gap:6px"><label class="chk"><input type="checkbox" id="am-send" ${S.mode==="web"?"checked":"disabled"}> Email them a sign-in link now</label><button class="primary">Add to panel</button></div></form>
+   <p class="small muted">Links work once and expire after an hour; the 6-digit code works on any device. Removing someone keeps any scores they entered. Use the Panel tab to stop counting a judge's sheet. Turning off "can sign in" blocks them right away.</p></div>`;
 }
 function vSetup(){
   const c=S.cfg,exN=Object.values(S.teams).filter(t=>t.example).length+Object.values(S.sheets).filter(s=>s.example).length,dis=advisorOnly();
@@ -869,12 +925,14 @@ document.addEventListener("click",e=>{
   if(b.dataset.ivband){const k=b.dataset.ivband,v=+b.dataset.v;saveMine(S.cur,d=>{d.iv[k]=v});return;}
   if(b.dataset.ivstep){const k=b.dataset.ivstep,c=IV.find(x=>x.id===k);saveMine(S.cur,d=>{const cur=d.iv[k]==null?c.bands[1][1]:d.iv[k];d.iv[k]=Math.max(0,Math.min(c.max,cur+ +b.dataset.d))});return;}
   if(b.dataset.bt){const k=b.dataset.bt,v=+b.dataset.v;saveMine(S.cur,d=>{d.bt=d.bt||{};if(d.bt[k]===v)delete d.bt[k];else d.bt[k]=v});return;}
+  if(b.dataset.invite){if(!S.isAdvisor)return;sendInvite(b.dataset.invite);return;}
   if(b.dataset.mremove){if(!S.isAdvisor)return;const em=b.dataset.mremove;if(S.confirmRemove===em){S.confirmRemove=null;put("members/"+em,null,true);toast("Removed "+em)}else{S.confirmRemove=em;render()}return;}
   const act=b.dataset.act;
   if(act==="demoenter"){ls.set("rjb.demoEntered",true);S.phase="member";location.hash="#portal";render();return;}
   if(act==="signout"){signOut();return;}
   if(act==="recheck"){S.auth.err="";sb.auth.getSession().then(r=>onSession(r.data&&r.data.session,true));return;}
   if(act==="resend"){sendLink(S.auth.sentTo);return;}
+  if(act==="inviteall"){if(S.isAdvisor)inviteAll();return;}
   if(act==="otheremail"){S.auth={sentTo:null,busy:false,err:"",info:""};render();return;}
   if(!S.isAdvisor&&["nbon","examples","clearex","roster"].includes(act))return toast("Only a Judge Advisor can do that");
   if(act==="nbon"){put("teams/"+S.cur,{...S.teams[S.cur],notebook:true},true);return;}
@@ -908,7 +966,9 @@ document.addEventListener("submit",e=>{e.preventDefault();const f=e.target;
   if(f.id==="addmember"){const em=$("#am-email").value.trim().toLowerCase(),nm=$("#am-name").value.trim();
     if(!/^[^@\s/]+@[^@\s/]+\.[^@\s/]+$/.test(em))return toast("Enter a full email address");
     if(S.members[em])return toast(em+" is already on the panel");
-    put("members/"+em,{role:$("#am-role").value,name:nm,initials:initialsOf(nm||em),active:true},true);toast("Added "+em+". Send them this site's address.");return;}
+    const send=$("#am-send")&&$("#am-send").checked;
+    put("members/"+em,{role:$("#am-role").value,name:nm,initials:initialsOf(nm||em),active:true},true);
+    if(send){setTimeout(()=>sendInvite(em),400);}else toast("Added "+em+". Use Send invite when you're ready.");return;}
   if(f.id==="addteam"){const n=$("#at-num").value.trim();if(!n)return;addTeam(n,$("#at-name").value.trim(),$("#at-org").value.trim(),$("#at-nb").checked);toast("Added "+n);return;}
   if(f.id==="cfgform"){const offered=AWARDS.filter(a=>a.req||($("#aw-"+a.id)||{}).checked).map(a=>a.id);
     put("meta/config",{name:$("#su-name").value.trim()||DEFAULT_CFG.name,date:$("#su-date").value,program:$("#su-prog").value,pct:Math.max(10,Math.min(100,+$("#su-pct").value||50)),gate:$("#su-gate").value,practice:$("#su-prac").checked,offered},true);toast("Event settings saved");}

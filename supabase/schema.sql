@@ -12,6 +12,12 @@ create table if not exists public.panel_members (
   active    boolean not null default true,
   added_at  timestamptz not null default now()
 );
+-- Sign-in invite tracking (shown to the Judge Advisor in Setup → Judges & access)
+alter table public.panel_members
+  add column if not exists last_invited_at timestamptz,
+  add column if not exists invite_tried_at timestamptz,
+  add column if not exists invite_count integer not null default 0,
+  add column if not exists invite_error text;
 
 create table if not exists public.teams (
   id         text primary key,

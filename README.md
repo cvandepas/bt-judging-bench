@@ -79,7 +79,7 @@ Open your site, enter the email you put in `schema.sql`, and sign in with the li
 
 1. **Setup → Judges & access:** add each judge's name and email. Add a co-advisor by choosing the **Judge Advisor** role.
 2. **Setup → Paste roster:** paste your team list (number, name, school per line). Set the event name, date and awards offered.
-3. Send judges the site link. Each one enters their email, signs in, and joins the panel with their initials. Judges who haven't signed in yet show as **Invited** on the Panel tab.
+3. Invite judges. Adding a judge emails them a sign-in link and 6-digit code (uncheck "Email them a sign-in link now" to wait). In the **Sign-in email** column, **Send invite / Resend** emails a fresh link and code at any time, and **Email all who haven't joined** does everyone still waiting. Each row shows when the last email went out, or why it couldn't be sent. Judges can also request their own link on the site. Judges who haven't signed in yet show as **Invited** on the Panel tab.
 4. Judges score in **Score** (notebook rubric, interview rubric, BT Lens, flags and notes). Everything saves as they tap.
 5. Watch **Panel**: coverage, each judge's notebook and interview totals per team, final averages, and amber flags where judges disagree. Open a team to see every criterion by judge, plus judges' notes.
 6. **Deliberate:** enter qualification and Skills ranks from the tournament software, review suggested winners, and record panel decisions.
@@ -103,6 +103,8 @@ These rules are enforced by the database itself (Postgres row-level security in 
 
 - **"Not on this judging panel":** the email must match exactly what's in Judges & access (case doesn't matter). Fix it there, then click **Check again**.
 - **No email arrives:** check spam; make sure custom SMTP is on (step 3.1) and the rate limit is high enough. Supabase allows one new link per email every 60 seconds.
+- **"Hourly email limit reached" in Setup:** custom SMTP is off, or the limit in **Authentication → Rate Limits** is too low. With custom SMTP off, Supabase's built-in email allows only 2 emails an hour for the whole site and only delivers to members of your Supabase organization, so judges won't get invites.
+- **"The email server refused to send":** the SMTP username or password is wrong. For Gmail, use a 16-character app password; for Brevo, use the SMTP login and SMTP key from Brevo's SMTP page.
 - **Link opens but doesn't sign in, or says it expired:** add your site address to Redirect URLs (step 5). Links work once and expire after an hour. Request a new one or use the 6-digit code.
 - **Live updates paused banner:** the app retries on its own and reloads data when you return to the tab. Check that `schema.sql` ran fully (its last section turns on live updates).
 - **Only demo mode shows:** `config.js` is blank or didn't upload with the site.
